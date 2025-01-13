@@ -5,12 +5,12 @@ from llama_index.embeddings.gemini import GeminiEmbedding
 
 arxiv_taxonomy_dict = json.load(open('arxiv_taxonomy_dict.json'))
 graph_store = Neo4jPropertyGraphStore(
-    url='neo4j+s://28ea85d7.databases.neo4j.io',
+    url='url',
     username='neo4j',
-    password='nwUFAJm0g3EFbSe6aPoaRj009VvlewHPPupHqu9RUGU',
+    password='default_password',
 )
 model = GeminiEmbedding(
-    api_key="AIzaSyAbXywaltgihJMRGqDXa8tUk8c-Cf1rpCw",
+    api_key="api_key",
     model_name="models/text-embedding-004",
     embed_batch_size=16
 )
