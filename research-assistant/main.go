@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sort"
 	"os"
+	"time"
 
 	"github.com/hypermodeinc/modus/sdk/go/pkg/models"
 	"github.com/hypermodeinc/modus/sdk/go/pkg/models/openai"
@@ -60,6 +61,13 @@ type Category struct {
     Description string `json:"description"`
 }
 
+type MessagesJSON struct {
+	Text string `json:"text"`
+	IsUser bool `json:"isUser"`
+	IsUseful bool `json:"isUseful"`
+	FadeIn bool `json:"fadeIn"`	
+}
+
 func createEntity(label, name string, properties map[string]any) map[string]interface{} {
     return map[string]interface{}{
         "label":      label,
@@ -79,7 +87,6 @@ func SayHello(name *string) string {
 	return fmt.Sprintf("Hello, %s!", s)
 }
 
-var selectedProvider = "gemini"
 var connectionName = "neo4j"
 var systemMessage = `You are a helpful research assistant. You have the capability to engage in normal conversations, but your primary role is to assist with research-related queries.
 
@@ -157,7 +164,11 @@ Example Tool Call:
 
 **Assistant:** (Calls SearchDDG to get context, then retrieveBestCategories, then SearchArxiv)
 (Presents Arxiv results)
-I found these papers on Arxiv related to quantum computing. Would you like me to add them to the knowledge base?
+I found these papers on Arxiv related to quantum computing:
+1. Paper 1 Name: Paper description 1.
+2. Paper 2 Name: Paper description 2.
+...
+Would you like me to add these papers to the knowledge base?
 
 **User:** Yes, please.
 
@@ -180,12 +191,6 @@ The best papers on quantum computing in the category "cs.QC" are [list of papers
 Here's a summary of the most relevant chunks from the paper "2301.12345": [summary of chunks]. (Note that this information is from the knowledge base).
 `
 
-var messages = []openai.Message {
-	openai.NewSystemMessage(systemMessage),
-}
-
-var papers = []ArxivResult {}
-
 var providerToModel = map[string]map[string]string{
 	"openai": {
 		"llm": "openai-llm",
@@ -201,12 +206,8 @@ var providerToModel = map[string]map[string]string{
 	},
 }
 
-func SelectProvider(provider string) {
-	selectedProvider = provider
-}
-
-func PromptLLM() (string, error) {
-	model, err := models.GetModel[openai.ChatModel](providerToModel[selectedProvider]["llm"])
+func PromptLLM(messages []openai.Message, provider string) (string, error) {
+	model, err := models.GetModel[openai.ChatModel](providerToModel[provider]["llm"])
 	if err != nil {
 		return "", fmt.Errorf("failed to get openai chat model: %w", err)
 	}
@@ -216,7 +217,18 @@ func PromptLLM() (string, error) {
 	}
 	output, err := model.Invoke(input)
 	if err != nil {
-		return "", fmt.Errorf("failed to invoke chat model: %w", err)
+		// If rate limited, wait for 30 seconds and retry
+		if strings.Contains(err.Error(), "429") {
+			for{
+				if err == nil {
+					break
+				}
+				time.Sleep(30 * time.Second)
+				output, err = model.Invoke(input)
+			}
+		} else {
+			return "", fmt.Errorf("failed to invoke chat model: %w", err)
+		}
 	}
 
 	if len(output.Choices) == 0 {
@@ -225,8 +237,9 @@ func PromptLLM() (string, error) {
 	return strings.TrimSpace(output.Choices[0].Message.Content), nil
 }
 
-func PromptEmbedModel(text string) ([]float32, error) {
-	model, err := models.GetModel[openai.EmbeddingsModel](providerToModel[selectedProvider]["embed"])
+func PromptEmbedModel(text string, provider string) ([]float32, error) {
+	model, err := models.GetModel[openai.EmbeddingsModel](providerToModel[provider]["embed"])
+	fmt.Printf("Model: %v\n", model)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get openai embeddings model: %w", err)
 	}
@@ -295,7 +308,6 @@ func SearchArxiv(query string, maxResults int) (*ArxivResponse, error) {
 	if err := json.NewDecoder(bytes.NewReader(resp.Body)).Decode(&responseJson); err != nil {
 		return nil, fmt.Errorf("failed to decode json response body: %w", err)
 	}
-	papers = responseJson.Results
 	return &responseJson, nil
 }
 
@@ -313,7 +325,7 @@ func indexExists(connectionName, indexName string) (bool, error) {
 	return len(resp.Records) > 0, nil
 }
 
-func AddCategoriesToNeo4j() error {
+func AddCategoriesToNeo4j(provider string) error {
     data, err := os.ReadFile("../arxiv_taxonomy_dict.json")
     if err != nil {
         return fmt.Errorf("failed to read arxiv_taxonomy_dict.json: %w", err)
@@ -326,7 +338,7 @@ func AddCategoriesToNeo4j() error {
 
     nodes := []map[string]interface{}{}
     for _, category := range categories {
-		embedding, err := PromptEmbedModel(category.Description)
+		embedding, err := PromptEmbedModel(category.Description, provider)
 		if err != nil {
 			return fmt.Errorf("failed to embed category description: %w", err)
 		}
@@ -358,7 +370,7 @@ func AddCategoriesToNeo4j() error {
     return nil
 }
 
-func InitializeNeo4j() error {
+func InitializeNeo4j(provider string) error {
 	// Check if either Category FTS or Vector index exists
 	ftsExists, err := indexExists(connectionName, "categoryFTS")
 	if err != nil {
@@ -375,7 +387,7 @@ func InitializeNeo4j() error {
 	}
 
 	// Add categories to Neo4j
-	if err := AddCategoriesToNeo4j(); err != nil {
+	if err := AddCategoriesToNeo4j(provider); err != nil {
 		return fmt.Errorf("failed to add categories to neo4j: %w", err)
 	}
 
@@ -546,9 +558,9 @@ func normalizeScores(results []map[string]any) ([]map[string]any, error) {
 }
 
 // Function to retrieve best categories based on query
-func RetrieveBestCategories(query string) ([]string, error) {
+func RetrieveBestCategories(query string, provider string) ([]string, error) {
 	// Embed the query
-	embedding, err := PromptEmbedModel(query)
+	embedding, err := PromptEmbedModel(query, provider)
 	if err != nil {
 		return nil, fmt.Errorf("failed to embed query: %w", err)
 	}
@@ -624,9 +636,9 @@ func RetrieveBestCategories(query string) ([]string, error) {
 }
 
 // Function to retrieve best papers based on query and category
-func RetrieveBestPapers(query string, category string) ([]string, error) {
+func RetrieveBestPapers(query string, category string, provider string) ([]string, error) {
 	// Embed the query
-	embedding, err := PromptEmbedModel(query)
+	embedding, err := PromptEmbedModel(query, provider)
 	if err != nil {
 		return nil, fmt.Errorf("failed to embed query: %w", err)
 	}
@@ -707,9 +719,9 @@ func RetrieveBestPapers(query string, category string) ([]string, error) {
 }
 
 // Function to retrieve best chunks based on query and paper name
-func RetrieveBestChunks(query string, paperName string) ([]string, error) {
+func RetrieveBestChunks(query string, paperName string, provider string) ([]string, error) {
 	// Embed the query
-	embedding, err := PromptEmbedModel(query)
+	embedding, err := PromptEmbedModel(query, provider)
 	if err != nil {
 		return nil, fmt.Errorf("failed to embed query: %w", err)
 	}
@@ -831,7 +843,7 @@ func CreatePaperIndexesInNeo4j(arxiv_id string) error {
 	return nil
 }
 
-func InsertPapersIntoNeo4j() error {
+func InsertPapersIntoNeo4j(papers []ArxivResult, provider string) error {
 	for _, paper := range papers {
 		// Get Arxiv ID from the paper link
 		arxivID := strings.Split(paper.Link, "/")[4]
@@ -891,7 +903,7 @@ func InsertPapersIntoNeo4j() error {
 		}
 		// Embed the paper text for each chunk and insert into neo4j
 		for i, chunk := range chunks["chunks"] {
-			embedding, err := PromptEmbedModel(chunk["text"].(string))
+			embedding, err := PromptEmbedModel(chunk["text"].(string), provider)
 			if err != nil {
 				return fmt.Errorf("failed to embed chunk: %w", err)
 			}
@@ -914,134 +926,216 @@ func InsertPapersIntoNeo4j() error {
 				return fmt.Errorf("failed to insert chunk into neo4j: %w", err)
 			}
 		}
-	}	
-	papers = []ArxivResult{}
+	}
 	return nil	
 }
 
-func ClearHistory() {
-	messages = []openai.Message {
-		openai.NewSystemMessage(systemMessage),
+func checkForToolCallWithLLM(response string, provider string) string {
+	model, err := models.GetModel[openai.ChatModel](providerToModel[provider]["llm"])
+	if err != nil {
+		return "NULL"
 	}
+	input, err := model.CreateInput(
+		openai.NewSystemMessage(`
+		Check for tool call within the provided message. If there exists no tool call, return NULL.
+		Else, return the tool call in JSON format, like so:
+		{
+			"tool": "SearchDDG",
+			"params": {
+				"query": "Quantum Computing",
+				"maxResults": 5
+			}
+		}
+		`),
+		openai.NewUserMessage(response),
+	)
+	if err != nil {
+		return "NULL"
+	}
+	output, err := model.Invoke(input)
+	// If rate limited, wait for 30 seconds and retry
+	if err != nil {
+		if strings.Contains(err.Error(), "429") {
+			for{
+				if err == nil {
+					break
+				}
+				time.Sleep(30 * time.Second)
+				output, err = model.Invoke(input)
+			}
+		} else {
+			return "NULL"
+		}
+	}
+	if len(output.Choices) == 0 {
+		return "NULL"
+	}
+	return output.Choices[0].Message.Content
 }
 
-func QueryAgent(query string) (string, error) {
-	// Get response from the language model
-	messages = append(messages, openai.NewUserMessage(query))
-	response, err := PromptLLM()
-	if err != nil {
-		return "", fmt.Errorf("failed to prompt language model: %w", err)
-	}
-	var nextMessage openai.Message
-	// Check if the response is a tool call
-	for {
-		if !strings.Contains(response, "json") {
-			break
-		}
-	
-		// Parse the tool call as JSON from the response in markdown format
-		toolCall := strings.Split(response, "```json")[1]
-		toolCall = strings.Split(toolCall, "```")[0]
-	
-		// Execute the tool call
-		var toolCallMap map[string]any
-		if err := json.Unmarshal([]byte(toolCall), &toolCallMap); err != nil {
-			return "", fmt.Errorf("failed to unmarshal tool call: %w", err)
-		}
-	
-		tool, ok := toolCallMap["tool"].(string)
-		if !ok {
-			return "", fmt.Errorf("failed to get tool from tool call")
-		}
-	
-		params, ok := toolCallMap["params"].(map[string]any)
-		if !ok {
-			return "", fmt.Errorf("failed to get params from tool call")
-		}
-	
-		switch tool {
-		case "SearchDDG":
-			query, ok := params["query"].(string)
-			if !ok {
-				return "", fmt.Errorf("failed to get query from params")
-			}
-			maxResults, ok := params["maxResults"].(float64)
-			if !ok {
-				return "", fmt.Errorf("failed to get maxResults from params")
-			}
-			ddgResponse, err := SearchDDG(query, int(maxResults))
-			if err != nil {
-				return "", fmt.Errorf("failed to search ddg: %w", err)
-			}
-			nextMessage = openai.NewAssistantMessage(fmt.Sprintf("I found these results on DuckDuckGo:\n\n%s", ddgResponse))
-		case "SearchArxiv":
-			query, ok := params["query"].(string)
-			if !ok {
-				return "", fmt.Errorf("failed to get query from params")
-			}
-			maxResults, ok := params["maxResults"].(float64)
-			if !ok {
-				return "", fmt.Errorf("failed to get maxResults from params")
-			}
-			arxivResponse, err := SearchArxiv(query, int(maxResults))
-			if err != nil {
-				return "", fmt.Errorf("failed to search arxiv: %w", err)
-			}
-			nextMessage = openai.NewAssistantMessage(fmt.Sprintf("I found these papers on Arxiv:\n\n%s", arxivResponse))
-		case "retrieveBestCategories":
-			query, ok := params["query"].(string)
-			if (!ok) {
-				return "", fmt.Errorf("failed to get query from params")
-			}
-			categories, err := RetrieveBestCategories(query)
-			if err != nil {
-				return "", fmt.Errorf("failed to retrieve best categories: %w", err)
-			}
-			nextMessage = openai.NewAssistantMessage(fmt.Sprintf("Based on your query, the best categories to search for would be %s", categories))
-		case "RetrieveBestPapers":
-			query, ok := params["query"].(string)
-			if !ok {
-				return "", fmt.Errorf("failed to get query from params")
-			}
-			category, ok := params["category"].(string)
-			if !ok {
-				return "", fmt.Errorf("failed to get category from params")
-			}
-			papers, err := RetrieveBestPapers(query, category)
-			if err != nil {
-				return "", fmt.Errorf("failed to retrieve best papers: %w", err)
-			}
-			nextMessage = openai.NewAssistantMessage(fmt.Sprintf("The best papers on %s in the category %s are %s", query, category, papers))
-		case "RetrieveBestChunks":
-			query, ok := params["query"].(string)
-			if !ok {
-				return "", fmt.Errorf("failed to get query from params")
-			}
-			paperName, ok := params["paperName"].(string)
-			if !ok {
-				return "", fmt.Errorf("failed to get paperName from params")
-			}
-			chunks, err := RetrieveBestChunks(query, paperName)
-			if err != nil {
-				return "", fmt.Errorf("failed to retrieve best chunks: %w", err)
-			}
-			nextMessage = openai.NewAssistantMessage(fmt.Sprintf("Here's a summary of the most relevant chunks from the paper %s:\n\n%s", paperName, chunks))
-		case "InsertPapersIntoNeo4j":
-			err := InsertPapersIntoNeo4j()
-			if err != nil {
-				return "", fmt.Errorf("failed to insert papers into neo4j: %w", err)
-			}
-			nextMessage = openai.NewAssistantMessage("Okay, I've added the papers and their chunks to the Neo4j database.")
-		}
-		messages = append(messages, nextMessage)
-	
-		// Call promptLLM again to get the next response
-		response, err = PromptLLM()
-		if err != nil {
-			return "", fmt.Errorf("failed to prompt language model: %w", err)
+func QueryAgent(messagesJSON string, provider string, papersJSON string) (string, string, error) {
+    var messages []openai.Message 
+    var papers []ArxivResult
+
+	var inputMessagesJson []MessagesJSON;
+
+	messages = append(messages, openai.NewSystemMessage(systemMessage))
+
+    // Unmarshal the JSON inputs into JSON
+	if err := json.Unmarshal([]byte(messagesJSON), &inputMessagesJson); err != nil {
+        return "", "", fmt.Errorf("failed to unmarshal messages: %w", err)
+    }
+
+	// Add the user messages to the messages array
+	for _, message := range inputMessagesJson {
+		if message.IsUser {
+			messages = append(messages, openai.NewUserMessage(message.Text))
+		} else {
+			messages = append(messages, openai.NewAssistantMessage(message.Text))
 		}
 	}
-	nextMessage = openai.NewAssistantMessage(response)
-	messages = append(messages, nextMessage)
-	return response, nil
+
+	// fmt.Printf("Messages: %s\n", messages[1].Content)
+
+	if err := json.Unmarshal([]byte(papersJSON), &papers); err != nil {
+        return "", "", fmt.Errorf("failed to unmarshal papers: %w", err)
+    }
+
+    // Get response from the language model
+    response, err := PromptLLM(messages, provider)
+    if err != nil {
+        return "", "", fmt.Errorf("failed to prompt language model: %w", err)
+    }
+    var nextMessage openai.Message
+
+    // Check if the response is a tool call
+    for {
+        toolCall := checkForToolCallWithLLM(response, provider)
+        toolCall = strings.TrimSpace(toolCall)
+        // If toolCall is NULL, break out of the loop
+        if toolCall == "NULL" {
+            break
+        }
+
+        messages = append(messages, openai.NewAssistantMessage(response))
+
+        // Parse the tool call as JSON from the response in markdown format
+        hasPrefixJson := strings.HasPrefix(toolCall, "```json")
+        hasSuffixCode := strings.HasSuffix(toolCall, "```")
+        if hasPrefixJson && hasSuffixCode {
+            toolCall = toolCall[7 : len(toolCall)-3]
+        } else {
+            return "", "", fmt.Errorf("failed to parse tool call from response: %s", toolCall)
+        }
+
+        // Execute the tool call
+        var toolCallMap map[string]any
+        if err := json.Unmarshal([]byte(toolCall), &toolCallMap); err != nil {
+            return "", "", fmt.Errorf("failed to unmarshal tool call: %w", err)
+        }
+
+        tool, ok := toolCallMap["tool"].(string)
+        if !ok {
+            return "", "", fmt.Errorf("failed to get tool from tool call")
+        }
+
+        params, ok := toolCallMap["params"].(map[string]any)
+        if !ok {
+            return "", "", fmt.Errorf("failed to get params from tool call")
+        }
+
+        switch tool {
+        case "SearchDDG":
+            query, ok := params["query"].(string)
+            if !ok {
+                return "", "", fmt.Errorf("failed to get query from params")
+            }
+            maxResults, ok := params["maxResults"].(float64)
+            if !ok {
+                return "", "", fmt.Errorf("failed to get maxResults from params")
+            }
+            ddgResponse, err := SearchDDG(query, int(maxResults))
+            if err != nil {
+                return "", "", fmt.Errorf("failed to search ddg: %w", err)
+            }
+            nextMessage = openai.NewAssistantMessage(fmt.Sprintf("I found these results on DuckDuckGo:\n\n%s", ddgResponse))
+        case "SearchArxiv":
+            query, ok := params["query"].(string)
+            if !ok {
+                return "", "", fmt.Errorf("failed to get query from params")
+            }
+            maxResults, ok := params["maxResults"].(float64)
+            if !ok {
+                return "", "", fmt.Errorf("failed to get maxResults from params")
+            }
+            arxivResponse, err := SearchArxiv(query, int(maxResults))
+            if err != nil {
+                return "", "", fmt.Errorf("failed to search arxiv: %w", err)
+            }
+            nextMessage = openai.NewAssistantMessage(fmt.Sprintf("I found these papers on Arxiv:\n\n%s", arxivResponse))
+            papers = arxivResponse.Results
+        case "retrieveBestCategories":
+            query, ok := params["query"].(string)
+            if !ok {
+                return "", "", fmt.Errorf("failed to get query from params")
+            }
+            categories, err := RetrieveBestCategories(query, provider)
+            if err != nil {
+                return "", "", fmt.Errorf("failed to retrieve best categories: %w", err)
+            }
+            nextMessage = openai.NewAssistantMessage(fmt.Sprintf("Based on your query, the best categories to search for would be %s", categories))
+        case "RetrieveBestPapers":
+            query, ok := params["query"].(string)
+            if !ok {
+                return "", "", fmt.Errorf("failed to get query from params")
+            }
+            category, ok := params["category"].(string)
+            if !ok {
+                return "", "", fmt.Errorf("failed to get category from params")
+            }
+            papers, err := RetrieveBestPapers(query, category, provider)
+            if err != nil {
+                return "", "", fmt.Errorf("failed to retrieve best papers: %w", err)
+            }
+            nextMessage = openai.NewAssistantMessage(fmt.Sprintf("The best papers on %s in the category %s are %s", query, category, papers))
+        case "RetrieveBestChunks":
+            query, ok := params["query"].(string)
+            if !ok {
+                return "", "", fmt.Errorf("failed to get query from params")
+            }
+            paperName, ok := params["paperName"].(string)
+            if !ok {
+                return "", "", fmt.Errorf("failed to get paperName from params")
+            }
+            chunks, err := RetrieveBestChunks(query, paperName, provider)
+            if err != nil {
+                return "", "", fmt.Errorf("failed to retrieve best chunks: %w", err)
+            }
+            nextMessage = openai.NewAssistantMessage(fmt.Sprintf("Here's a summary of the most relevant chunks from the paper %s:\n\n%s", paperName, chunks))
+        case "InsertPapersIntoNeo4j":
+            err := InsertPapersIntoNeo4j(papers, provider)
+            if err != nil {
+                return "", "", fmt.Errorf("failed to insert papers into neo4j: %w", err)
+            }
+            nextMessage = openai.NewAssistantMessage("Okay, I've added the papers and their chunks to the Neo4j database.")
+        }
+        messages = append(messages, nextMessage)
+
+        // Call promptLLM again to get the next response
+        response, err = PromptLLM(messages, provider)
+        if err != nil {
+            return "", "", fmt.Errorf("failed to prompt language model: %w", err)
+        }
+    }
+    messages = append(messages, openai.NewAssistantMessage(response))
+
+	// Marshal the messages to JSON
+	resMessagesJSON, err := json.Marshal(messages)
+    // Marshal the papers to JSON
+    resPapersJSON, err := json.Marshal(papers)
+    if err != nil {
+        return "", "", fmt.Errorf("failed to marshal papers: %w", err)
+    }
+
+    return string(resMessagesJSON), string(resPapersJSON), nil
 }
