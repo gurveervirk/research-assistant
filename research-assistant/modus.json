@@ -1,0 +1,66 @@
+{
+  "$schema": "https://schema.hypermode.com/modus.json",
+  "endpoints": {
+    "default": {
+      "type": "graphql",
+      "path": "/graphql",
+      "auth": "bearer-token"
+    }
+  },
+  "connections": {
+    "tools-helper": {
+      "type": "http",
+      "baseUrl": "http://localhost:3000/"
+    },
+    "neo4j": {
+      "type": "neo4j",
+      "dbUri": "neo4j+s://28ea85d7.databases.neo4j.io",
+      "username": "neo4j",
+      "password": "{{PASSWORD}}"
+    },
+    "openai": {
+      "type": "http",
+      "baseUrl": "https://api.openai.com/",
+      "headers": {
+        "Authorization": "Bearer {{OPENAI_API_KEY}}"
+      }
+    },
+    "google": {
+      "type": "http",
+      "baseUrl": "https://generativelanguage.googleapis.com/",
+      "headers": {
+        "Authorization": "Bearer {{API_KEY}}"
+      }
+    }
+  },
+  "models": {
+    "openai-llm": {
+      "sourceModel": "gpt-4o",
+      "connection": "openai"
+    },
+    "openai-embedding": {
+      "sourceModel": "text-embedding-3-large",
+      "connection": "openai"
+    },
+    "gemini-llm": {
+      "sourceModel": "gemini-2.0-flash-exp",
+      "connection": "google",
+      "path": "v1beta/openai/chat/completions"
+    },
+    "gemini-embedding": {
+      "sourceModel": "text-embedding-004",
+      "connection": "google",
+      "path": "v1beta/openai/embeddings"
+    },
+    "text-generator": {
+      "sourceModel": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+      "provider": "hugging-face",
+      "connection": "hypermode"
+    },
+    "text-embedding": {
+      "sourceModel": "sentence-transformers/all-MiniLM-L6-v2",
+      "provider": "hugging-face",
+      "connection": "hypermode"
+    }
+  }
+}
