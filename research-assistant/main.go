@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"sort"
+	"os"
 
 	"github.com/hypermodeinc/modus/sdk/go/pkg/models"
 	"github.com/hypermodeinc/modus/sdk/go/pkg/models/openai"
@@ -51,6 +52,20 @@ type DDGRequest struct {
 
 type PaperInsertRequest struct {
 	Papers []ArxivResult `json:"papers"`
+}
+
+type Category struct {
+    Abbrev      string `json:"abbrev"`
+    Name        string `json:"name"`
+    Description string `json:"description"`
+}
+
+func createEntity(label, name string, properties map[string]any) map[string]interface{} {
+    return map[string]interface{}{
+        "label":      label,
+        "name":       name,
+        "properties": properties,
+    }
 }
 
 func SayHello(name *string) string {
@@ -298,6 +313,51 @@ func indexExists(connectionName, indexName string) (bool, error) {
 	return len(resp.Records) > 0, nil
 }
 
+func AddCategoriesToNeo4j() error {
+    data, err := os.ReadFile("../arxiv_taxonomy_dict.json")
+    if err != nil {
+        return fmt.Errorf("failed to read arxiv_taxonomy_dict.json: %w", err)
+    }
+
+    var categories []Category
+    if err := json.Unmarshal(data, &categories); err != nil {
+        return fmt.Errorf("failed to unmarshal categories: %w", err)
+    }
+
+    nodes := []map[string]interface{}{}
+    for _, category := range categories {
+		embedding, err := PromptEmbedModel(category.Description)
+		if err != nil {
+			return fmt.Errorf("failed to embed category description: %w", err)
+		}
+        properties := map[string]any{
+            "abbrev":      category.Abbrev,
+            "description": category.Description,
+			"embedding": embedding,
+        }
+        nodes = append(nodes, createEntity("Category", category.Name, properties))
+    }
+
+    for _, node := range nodes {
+        _, err := neo4j.ExecuteQuery(
+            connectionName,
+            `
+            MERGE (n:Category {name: $name})
+            SET n += $properties
+            `,
+            map[string]interface{}{
+                "name":       node["name"],
+                "properties": node["properties"],
+            },
+        )
+        if err != nil {
+            return fmt.Errorf("failed to upsert node: %w", err)
+        }
+    }
+
+    return nil
+}
+
 func InitializeNeo4j() error {
 	// Check if either Category FTS or Vector index exists
 	ftsExists, err := indexExists(connectionName, "categoryFTS")
@@ -312,6 +372,11 @@ func InitializeNeo4j() error {
 	if ftsExists || vectorExists {
 		fmt.Println("Skipping creation of indexes, already exist")
 		return nil
+	}
+
+	// Add categories to Neo4j
+	if err := AddCategoriesToNeo4j(); err != nil {
+		return fmt.Errorf("failed to add categories to neo4j: %w", err)
 	}
 
 	// Create a global FTS index on __Entity__ for properties: snippet, description, name, text

@@ -5,7 +5,7 @@ from flask import Flask, request, jsonify
 from duckduckgo_search import DDGS
 from llama_index.core import SimpleDirectoryReader
 
-arxiv_categories = json.load(open('arxiv_taxonomy_dict.json'))
+arxiv_categories = json.load(open('../arxiv_categories.json', 'r'))
 abbrev_to_fullname = {
     item["abbrev"]: item["name"] for item in arxiv_categories
 }
